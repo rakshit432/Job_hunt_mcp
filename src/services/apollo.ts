@@ -23,30 +23,25 @@ export interface ApolloPerson {
  * Enriches a person profile to reveal their real verified corporate email via Apollo /people/match.
  */
 export async function enrichPersonViaApollo(
-  personId?: string,
   firstName?: string,
   lastName?: string,
-  domainOrName?: string
+  domainOrName?: string,
+  linkedinUrl?: string
 ): Promise<{ email: string | null; email_status: string | null }> {
   const apiKey = getApolloKey();
   if (!apiKey) return { email: null, email_status: null };
 
   const body: Record<string, unknown> = {
-    api_key: apiKey,
     reveal_personal_emails: false,
   };
 
-  if (personId) {
-    body.id = personId;
-  }
   if (firstName) body.first_name = firstName;
   if (lastName) body.last_name = lastName;
-  if (domainOrName) {
-    if (domainOrName.includes(".")) {
-      body.domain = domainOrName;
-    } else {
-      body.organization_name = domainOrName;
-    }
+  if (domainOrName && domainOrName.includes(".")) {
+    body.domain = domainOrName;
+  }
+  if (linkedinUrl) {
+    body.linkedin_url = linkedinUrl;
   }
 
   try {
@@ -61,7 +56,7 @@ export async function enrichPersonViaApollo(
     });
 
     if (!res.ok) {
-      console.error(`Apollo /people/match error: ${res.status} ${await res.text()}`);
+      console.error(`Apollo /people/match status ${res.status}: ${await res.text()}`);
       return { email: null, email_status: null };
     }
 
@@ -99,7 +94,6 @@ export async function searchPeopleViaApollo(
 
   const isDomain = domainOrName.includes(".");
   const body: Record<string, unknown> = {
-    api_key: apiKey,
     person_titles: targetTitles,
     page: 1,
     per_page: limit,
@@ -112,7 +106,8 @@ export async function searchPeopleViaApollo(
   }
 
   try {
-    const res = await fetch(`${APOLLO_API_BASE}/mixed_people/search`, {
+    // Try modern api_search endpoint first, fall back to search
+    let res = await fetch(`${APOLLO_API_BASE}/mixed_people/api_search`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -123,7 +118,19 @@ export async function searchPeopleViaApollo(
     });
 
     if (!res.ok) {
-      console.error(`Apollo API error: ${res.status} ${await res.text()}`);
+      res = await fetch(`${APOLLO_API_BASE}/mixed_people/search`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Cache-Control": "no-cache",
+          "X-Api-Key": apiKey,
+        },
+        body: JSON.stringify(body),
+      });
+    }
+
+    if (!res.ok) {
+      console.error(`Apollo search error: ${res.status} ${await res.text()}`);
       return [];
     }
 
@@ -154,13 +161,13 @@ export async function searchPeopleViaApollo(
       let email = p.email || null;
       let email_status = p.email_status || null;
 
-      // Apollo search omits the email by default; enrich via /people/match to retrieve real verified email
-      if (!email && (p.id || (p.first_name && p.last_name))) {
+      // Enrich via Apollo /people/match to retrieve real verified corporate email
+      if (!email && (p.first_name || p.linkedin_url)) {
         const enriched = await enrichPersonViaApollo(
-          p.id,
           p.first_name,
           p.last_name,
-          domainOrName
+          domainOrName,
+          p.linkedin_url || undefined
         );
         if (enriched.email) {
           email = enriched.email;
