@@ -1,12 +1,13 @@
 import { UserFacingError } from "../errors.js";
 
-const APOLLO_API_BASE = "https://api.apollo.io/v1";
+const APOLLO_API_BASE = "https://api.apollo.io/api/v1";
 
 function getApolloKey(): string | null {
   return process.env.APOLLO_API_KEY || null;
 }
 
 export interface ApolloPerson {
+  id?: string;
   name: string;
   first_name: string;
   last_name: string;
@@ -19,10 +20,72 @@ export interface ApolloPerson {
 }
 
 /**
- * Searches for people at a company matching specific target job titles.
- * Uses Apollo's mixed_people/search API.
+ * Enriches a person profile to reveal their real verified corporate email via Apollo /people/match.
  */
+export async function enrichPersonViaApollo(
+  personId?: string,
+  firstName?: string,
+  lastName?: string,
+  domainOrName?: string
+): Promise<{ email: string | null; email_status: string | null }> {
+  const apiKey = getApolloKey();
+  if (!apiKey) return { email: null, email_status: null };
 
+  const body: Record<string, unknown> = {
+    api_key: apiKey,
+    reveal_personal_emails: false,
+  };
+
+  if (personId) {
+    body.id = personId;
+  }
+  if (firstName) body.first_name = firstName;
+  if (lastName) body.last_name = lastName;
+  if (domainOrName) {
+    if (domainOrName.includes(".")) {
+      body.domain = domainOrName;
+    } else {
+      body.organization_name = domainOrName;
+    }
+  }
+
+  try {
+    const res = await fetch(`${APOLLO_API_BASE}/people/match`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "no-cache",
+        "X-Api-Key": apiKey,
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      console.error(`Apollo /people/match error: ${res.status} ${await res.text()}`);
+      return { email: null, email_status: null };
+    }
+
+    const data = (await res.json()) as {
+      person?: {
+        email?: string;
+        email_status?: string;
+      };
+    };
+
+    return {
+      email: data.person?.email || null,
+      email_status: data.person?.email_status || null,
+    };
+  } catch (err) {
+    console.error("Apollo enrichPerson failed:", err);
+    return { email: null, email_status: null };
+  }
+}
+
+/**
+ * Searches for people at a company matching specific target job titles,
+ * and enriches them with real verified work emails directly through Apollo.io.
+ */
 export async function searchPeopleViaApollo(
   domainOrName: string,
   targetTitles: string[],
@@ -30,11 +93,10 @@ export async function searchPeopleViaApollo(
 ): Promise<ApolloPerson[]> {
   const apiKey = getApolloKey();
   if (!apiKey) {
+    console.error("APOLLO_API_KEY is not set in environment.");
     return [];
   }
 
-  // Determine if domain or company name was passed
-  
   const isDomain = domainOrName.includes(".");
   const body: Record<string, unknown> = {
     api_key: apiKey,
@@ -67,6 +129,7 @@ export async function searchPeopleViaApollo(
 
     const data = (await res.json()) as {
       people?: Array<{
+        id?: string;
         name?: string;
         first_name?: string;
         last_name?: string;
@@ -85,20 +148,43 @@ export async function searchPeopleViaApollo(
       return [];
     }
 
-    return data.people.map((p) => ({
-      name: p.name || `${p.first_name || ""} ${p.last_name || ""}`.trim(),
-      first_name: p.first_name || "",
-      last_name: p.last_name || "",
-      title: p.title || "Team Member",
-      email: p.email || null,
-      email_status: p.email_status || null,
-      linkedin_url: p.linkedin_url || null,
-      organization_name: p.organization?.name,
-      organization_estimated_num_employees: p.organization?.estimated_num_employees,
-    }));
+    const results: ApolloPerson[] = [];
+
+    for (const p of data.people) {
+      let email = p.email || null;
+      let email_status = p.email_status || null;
+
+      // Apollo search omits the email by default; enrich via /people/match to retrieve real verified email
+      if (!email && (p.id || (p.first_name && p.last_name))) {
+        const enriched = await enrichPersonViaApollo(
+          p.id,
+          p.first_name,
+          p.last_name,
+          domainOrName
+        );
+        if (enriched.email) {
+          email = enriched.email;
+          email_status = enriched.email_status || "verified";
+        }
+      }
+
+      results.push({
+        id: p.id,
+        name: p.name || `${p.first_name || ""} ${p.last_name || ""}`.trim(),
+        first_name: p.first_name || "",
+        last_name: p.last_name || "",
+        title: p.title || "Team Member",
+        email,
+        email_status,
+        linkedin_url: p.linkedin_url || null,
+        organization_name: p.organization?.name,
+        organization_estimated_num_employees: p.organization?.estimated_num_employees,
+      });
+    }
+
+    return results;
   } catch (err) {
     console.error("Apollo search failed:", err);
     return [];
   }
 }
-

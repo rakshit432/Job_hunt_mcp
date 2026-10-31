@@ -272,6 +272,30 @@ export async function ingestCompany(input: IngestCompanyInput) {
   return rows[0];
 }
 
+export async function updateCompanyProfile(
+  companyId: number,
+  fields: { website?: string; domain?: string; team_size?: number }
+) {
+  const domain = fields.domain || extractDomain(fields.website);
+  const sql = `
+    UPDATE companies
+    SET website = COALESCE($1, website),
+        domain = COALESCE($2, domain),
+        team_size = COALESCE($3, team_size)
+    WHERE id = $4
+    RETURNING *`;
+  const { rows } = await pool.query(sql, [
+    fields.website ?? null,
+    domain,
+    fields.team_size ?? null,
+    companyId,
+  ]);
+  if (rows.length === 0) {
+    throw new UserFacingError(`Company ID ${companyId} not found.`);
+  }
+  return rows[0];
+}
+
 export async function getCompanyDetails(companyId: number) {
   const compRes = await pool.query("SELECT * FROM companies WHERE id = $1", [companyId]);
   if (compRes.rowCount === 0) {
