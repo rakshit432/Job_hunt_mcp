@@ -6,6 +6,15 @@ function getApolloKey(): string | null {
   return process.env.APOLLO_API_KEY || null;
 }
 
+function cleanDomain(input: string): string {
+  try {
+    const url = input.startsWith("http") ? input : `https://${input}`;
+    return new URL(url).hostname.replace(/^www\./, "").toLowerCase().trim();
+  } catch {
+    return input.replace(/^(https?:\/\/)?(www\.)?/, "").split("/")[0].toLowerCase().trim();
+  }
+}
+
 export interface ApolloPerson {
   id?: string;
   name: string;
@@ -38,7 +47,7 @@ export async function enrichPersonViaApollo(
   if (firstName) body.first_name = firstName;
   if (lastName) body.last_name = lastName;
   if (domainOrName && domainOrName.includes(".")) {
-    body.domain = domainOrName;
+    body.domain = cleanDomain(domainOrName);
   }
   if (linkedinUrl) {
     body.linkedin_url = linkedinUrl;
@@ -88,8 +97,7 @@ export async function searchPeopleViaApollo(
 ): Promise<ApolloPerson[]> {
   const apiKey = getApolloKey();
   if (!apiKey) {
-    console.error("APOLLO_API_KEY is not set in environment.");
-    return [];
+    throw new UserFacingError("APOLLO_API_KEY is not configured in the server environment variables.");
   }
 
   const isDomain = domainOrName.includes(".");
@@ -100,9 +108,10 @@ export async function searchPeopleViaApollo(
   };
 
   if (isDomain) {
-    body.q_organization_domains = domainOrName;
+    // Apollo requires q_organization_domains to be an ARRAY of clean domain strings
+    body.q_organization_domains = [cleanDomain(domainOrName)];
   } else {
-    body.q_organization_name = domainOrName;
+    body.q_organization_name = domainOrName.trim();
   }
 
   try {
@@ -117,7 +126,7 @@ export async function searchPeopleViaApollo(
       body: JSON.stringify(body),
     });
 
-    if (!res.ok) {
+    if (!res.ok && res.status === 404) {
       res = await fetch(`${APOLLO_API_BASE}/mixed_people/search`, {
         method: "POST",
         headers: {
@@ -130,8 +139,9 @@ export async function searchPeopleViaApollo(
     }
 
     if (!res.ok) {
-      console.error(`Apollo search error: ${res.status} ${await res.text()}`);
-      return [];
+      const errText = await res.text();
+      console.error(`Apollo search error: ${res.status} ${errText}`);
+      throw new UserFacingError(`Apollo search failed (${res.status}): ${errText}`);
     }
 
     const data = (await res.json()) as {
@@ -191,7 +201,10 @@ export async function searchPeopleViaApollo(
 
     return results;
   } catch (err) {
+    if (err instanceof UserFacingError) {
+      throw err;
+    }
     console.error("Apollo search failed:", err);
-    return [];
+    throw new UserFacingError(`Apollo API connection error: ${(err as Error).message}`);
   }
 }
