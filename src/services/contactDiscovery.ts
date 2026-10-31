@@ -20,6 +20,7 @@ export interface DiscoveredContact {
  *
  * All emails returned are verified/sourced directly from Apollo.io.
  */
+
 export async function discoverAndSaveContacts(
   companyId: number
 ): Promise<{ tier: string; source: "apollo"; contacts: ContactRecord[] }> {
