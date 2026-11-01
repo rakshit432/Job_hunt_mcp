@@ -1,4 +1,5 @@
 import { UserFacingError } from "../errors.js";
+import { fetchWithTimeout } from "./fetchWithTimeout.js";
 
 const APOLLO_API_BASE = "https://api.apollo.io/api/v1";
 
@@ -54,7 +55,7 @@ export async function enrichPersonViaApollo(
   }
 
   try {
-    const res = await fetch(`${APOLLO_API_BASE}/people/match`, {
+    const res = await fetchWithTimeout(`${APOLLO_API_BASE}/people/match`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -65,7 +66,7 @@ export async function enrichPersonViaApollo(
     });
 
     if (!res.ok) {
-      console.error(`Apollo /people/match status ${res.status}: ${await res.text()}`);
+      console.error(`Apollo /people/match failed with status ${res.status}.`);
       return { email: null, email_status: null };
     }
 
@@ -116,7 +117,7 @@ export async function searchPeopleViaApollo(
 
   try {
     // Try modern api_search endpoint first, fall back to search
-    let res = await fetch(`${APOLLO_API_BASE}/mixed_people/api_search`, {
+    let res = await fetchWithTimeout(`${APOLLO_API_BASE}/mixed_people/api_search`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -127,7 +128,7 @@ export async function searchPeopleViaApollo(
     });
 
     if (!res.ok && res.status === 404) {
-      res = await fetch(`${APOLLO_API_BASE}/mixed_people/search`, {
+      res = await fetchWithTimeout(`${APOLLO_API_BASE}/mixed_people/search`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -139,9 +140,8 @@ export async function searchPeopleViaApollo(
     }
 
     if (!res.ok) {
-      const errText = await res.text();
-      console.error(`Apollo search error: ${res.status} ${errText}`);
-      throw new UserFacingError(`Apollo search failed (${res.status}): ${errText}`);
+      console.error(`Apollo search failed with status ${res.status}.`);
+      throw new UserFacingError(`Apollo search failed (${res.status}).`);
     }
 
     const data = (await res.json()) as {
@@ -179,9 +179,9 @@ export async function searchPeopleViaApollo(
           domainOrName,
           p.linkedin_url || undefined
         );
-        if (enriched.email) {
+        if (enriched.email && enriched.email_status) {
           email = enriched.email;
-          email_status = enriched.email_status || "verified";
+          email_status = enriched.email_status;
         }
       }
 

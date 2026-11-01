@@ -1,106 +1,88 @@
-# Job Hunt MCP Server 🚀
+# Job Hunt MCP Server
 
-An automated cold outreach and internship hunting engine built on the **Model Context Protocol (MCP)**, **Apollo.io**, **Firecrawl**, and **PostgreSQL (Supabase)**.
+A local-first job search and startup outreach tracker built with TypeScript, the Model Context Protocol (MCP), PostgreSQL, Apollo, and Firecrawl. It can run as a local stdio server for Claude Desktop or as an authenticated HTTP/SSE service.
 
-Custom-built for tech cold outreach to newly funded startups, hiring managers, and referral engineers.
+The server discovers and stores companies and contacts, tracks outreach, and creates email drafts for review. **It never sends email.** It does not guess email addresses.
 
----
+## What it does
 
-## 🌟 Key Features
+- Scrapes funding and company pages with Firecrawl.
+- Stores company profiles, email addresses, and structured contact records.
+- Searches Apollo first, then uses configured discovery providers and public sources as fallbacks.
+- Labels provider-verified addresses `verified`; addresses found on public pages are labeled `published`; user-entered addresses are labeled `provided`.
+- Creates personalized drafts from `data/template.md` and tracks status and follow-up dates.
 
-1. **Funding Radar**: Scrapes funding announcements, VC portfolios, and tech venture news (Inc42, YourStory, Entrackr, Peak XV, Blume Ventures) via **Firecrawl**.
-2. **Tiered Contact Discovery**:
-   - **Company Size $\le 50$**: Finds Founders, Co-Founders, and CTOs.
-   - **Company Size $> 50$**: Finds Technical Recruiters, Talent Acquisition Leads, and Engineering Managers.
-   - **Fallback**: Finds Lead Software Engineers and Senior SWEs for internal referrals.
-3. **Verified Email Extraction**:
-   - Primary: **Apollo.io** for real, verified B2B email addresses and LinkedIn profiles.
-   - Fallback: Corporate domain pattern prediction (`first@domain`, `first.last@domain`).
-4. **Cold Outreach Drafting**:
-   - Personalized email builder targeting software engineering, backend, and GenAI roles.
-   - Injects company focus, observation, and personal credentials.
-5. **Pessimistic State Machine**:
-   - Enforces linear pipeline stages: `new` $\rightarrow$ `drafted` $\rightarrow$ `sent` $\rightarrow$ `replied` / `no_response`.
-   - Never sends emails automatically: creates drafts for your personal review and records follow-up dates.
-
----
-
-## 🛠️ MCP Tools Overview
+## MCP tools
 
 | Tool | Purpose |
 |---|---|
-| `scrape_funding_deals` | Scrapes VC portfolios or funding articles via Firecrawl to discover fresh startups. |
-| `ingest_company` | Adds a newly discovered company with its `team_size`, website, and funding details to the DB. |
-| `discover_contacts` | Runs Apollo.io / Firecrawl tiered contact search (Founders vs Recruiters vs Referral SWEs). |
-| `get_company_details`| Retrieves company dossier: profile, discovered contacts, and outreach history/drafts. |
-| `list_checklist` | Lists tracked companies filtered by status (`new`, `drafted`, `sent`, `followup_due`). |
-| `draft_email` | Generates a personalized cold email draft from your template and saves it to DB. |
-| `update_status` | Advances pipeline status (e.g. mark as `sent` after you personally send the email). |
+| `scrape_funding_deals` | Scrape a URL and return its title and Markdown. |
+| `ingest_company` | Add or update a company, direct email addresses, and structured contacts. |
+| `update_company_profile` | Update a company’s website, domain, or team size. |
+| `discover_contacts` | Search for contacts and save discovered email addresses for one company. |
+| `discover_all_company_emails` | Discover contacts in batches; defaults to 25 companies and accepts up to 100 per call. Use `next_offset` to continue. |
+| `get_company_details` | Return a company profile, contacts, and outreach history. |
+| `list_checklist` | List companies by pipeline status or due follow-up. |
+| `update_status` | Advance a company through the outreach status flow. Mark `sent` only after you send the email yourself. |
+| `draft_email` | Create or replace an outreach draft. It does not send it. |
 
----
+`ingest_company` accepts `emails` for company inboxes and `contacts` for people. A contact can include `name`, `role`, `contact_tier`, `email`, `email_confidence`, `profile_url`, and `source`. Email and profile URL are optional. For example:
 
-## ⚙️ Setup & Configuration
+```json
+{
+  "name": "Acme AI",
+  "website": "https://acme.ai",
+  "team_size": 15,
+  "funding_round": "Seed",
+  "emails": ["hello@acme.ai"],
+  "contacts": [
+    {
+      "name": "Taylor Example",
+      "role": "Founder",
+      "contact_tier": "founder",
+      "email": "taylor@acme.ai",
+      "email_confidence": "provided",
+      "profile_url": "https://www.linkedin.com/in/taylor-example",
+      "source": "manual"
+    }
+  ]
+}
+```
 
-### 1. Environment Variables (`.env`)
-Create or edit `.env` in the `job-hunt-mcp/` directory:
+## Run locally with Claude Desktop
+
+### 1. Configure environment
+
+Create `C:\Users\BIT\Desktop\mcp_project\job-hunt-mcp\.env` with your PostgreSQL URL and provider keys:
 
 ```env
-DATABASE_URL=postgresql://<user>:<password>@<host>:5432/<database>
-FIRECRAWL_API_KEY=fc-xxxxxxxxxxxxxxxxxxxx
-APOLLO_API_KEY=your_apollo_api_key_here
+DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/DATABASE
+FIRECRAWL_API_KEY=your-firecrawl-key
+APOLLO_API_KEY=your-apollo-key
+PROSPEO_API_KEY=your-prospeo-key
+SNOV_CLIENT_ID=your-snov-client-id
+SNOV_CLIENT_SECRET=your-snov-client-secret
 FOLLOWUP_AFTER_DAYS=6
+
+# For a trusted local database endpoint using a self-signed certificate only:
+DATABASE_SSL_REJECT_UNAUTHORIZED=false
 ```
 
-### 2. Install Dependencies
-```bash
-npm install
-```
+Provider keys beyond `DATABASE_URL` are optional, but contact discovery will have fewer sources without them. The self-signed certificate setting disables certificate verification while retaining TLS encryption. Use it only for a database host you trust. For production, keep verification enabled and configure the provider’s CA if needed.
 
-### 3. Run Tests
-```bash
-npm test
-```
+### 2. Build the server
 
-### 4. Build & Run
+In PowerShell:
 
-```bash
-# Local stdio mode (Claude Desktop)
-npm run dev
-
-# Remote HTTP / SSE server mode (for cloud hosting)
-npm run start:http
-
-# Production Build
+```powershell
+cd C:\Users\BIT\Desktop\mcp_project\job-hunt-mcp
+npm ci
 npm run build
-npm start
 ```
 
----
+### 3. Add the server to Claude Desktop
 
-## ☁️ Remote HTTP / SSE Deployment (Deploy to Railway / Render)
-
-You can deploy this server to the cloud so anyone can connect to it via URL without installing Node.js:
-
-1. Push this repository to GitHub.
-2. Link it to **[Railway.app](https://railway.app)** or **[Render.com](https://render.com)**.
-3. Set your environment variables in their dashboard (`DATABASE_URL`, `FIRECRAWL_API_KEY`, `APOLLO_API_KEY`, and optional `AUTH_TOKEN`).
-4. Connect from Claude Desktop using the public URL:
-   ```json
-   {
-     "mcpServers": {
-       "job-hunt": {
-         "url": "https://your-app.up.railway.app/sse"
-       }
-     }
-   }
-   ```
-
----
-
-## 🔌 Connecting to Local MCP Clients
-
-### Claude Desktop / Cursor / Antigravity Settings
-Add the server configuration to your MCP config JSON:
+Open Claude Desktop **Settings → Developer → Edit Config**. Add this entry to `claude_desktop_config.json`:
 
 ```json
 {
@@ -108,33 +90,55 @@ Add the server configuration to your MCP config JSON:
     "job-hunt": {
       "command": "node",
       "args": [
-        "c:/Users/BIT/Desktop/mcp_project/job-hunt-mcp/dist/index.js"
-      ],
-      "env": {
-        "DATABASE_URL": "postgresql://...",
-        "FIRECRAWL_API_KEY": "fc-...",
-        "APOLLO_API_KEY": "..."
-      }
+        "C:/Users/BIT/Desktop/mcp_project/job-hunt-mcp/dist/index.js"
+      ]
     }
   }
 }
 ```
 
----
+Save the file, fully quit Claude Desktop, and reopen it. The server loads `.env` from the project directory when it starts. If Claude Desktop already has an `mcpServers` object, add the `job-hunt` entry inside it rather than replacing the other servers.
 
-## 📋 Typical Workflow
+The first successful startup applies pending database migrations. After connecting, try `ingest_company`, then `discover_contacts` or `draft_email`.
 
-```
-1. scrape_funding_deals(url="https://inc42.com/buzz/indian-startup-funding-tracker/")
-        ↓
-2. ingest_company(name="Acme AI", team_size=15, website="https://acme.ai", funding_round="Seed")
-        ↓
-3. discover_contacts(company_id=1)  # Automatically finds Founders & verified emails via Apollo
-        ↓
-4. draft_email(company_id=1, focus="LLM agent orchestration", observation="the fast inference speed")
-        ↓
-5. Review draft → You send it from your personal Gmail
-        ↓
-6. update_status(company_id=1, status="sent")  # Sets follow-up reminder for 6 days later
+## Run tests
+
+```powershell
+npm test
 ```
 
+## HTTP/SSE deployment
+
+The HTTP server is for hosted deployments. In production, set:
+
+```env
+NODE_ENV=production
+DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/DATABASE
+DATABASE_SSL_REJECT_UNAUTHORIZED=true
+AUTH_TOKEN=a-long-random-secret-at-least-32-characters
+FIRECRAWL_API_KEY=your-firecrawl-key
+APOLLO_API_KEY=your-apollo-key
+CORS_ORIGINS=https://your-approved-browser-origin.example
+PUBLIC_BASE_URL=https://your-service.example
+PORT=3000
+```
+
+`AUTH_TOKEN` is required in production. Send it as `Authorization: Bearer <token>`; query-string tokens are not accepted. `/health` is a public liveness endpoint, `/ready` checks database connectivity, and `/openapi.json` publishes the REST API description. Set `CORS_ORIGINS` to a comma-separated list of exact browser origins, or leave it empty if browser access is not needed.
+
+Run the compiled HTTP server with:
+
+```powershell
+npm run build
+npm start
+```
+
+The Docker image uses Node 24, runs as a non-root user, and checks `/ready`. Hosted MCP clients must send the bearer token in their HTTP headers. Store secrets in the hosting provider’s secret manager, not in the repository.
+
+## Status flow
+
+```text
+new → drafted → sent → replied
+                   ↘ no_response → drafted
+```
+
+Companies can also be marked `skipped` or `rejected` where allowed by the status rules. The server records drafts and follow-up dates but does not send messages.

@@ -1,6 +1,7 @@
 import { pool } from "../client.js";
 import { assertTransition, type Status } from "../../services/statusMachine.js";
 import { UserFacingError } from "../../errors.js";
+import { addCompanyEmails, addContact, type ContactRecord } from "./contacts.js";
 
 export type ChecklistFilter =
   | "all"
@@ -212,6 +213,16 @@ export interface IngestCompanyInput {
   name: string;
   website?: string;
   domain?: string;
+  emails?: string[];
+  contacts?: Array<{
+    name?: string;
+    role?: string;
+    contact_tier?: "founder" | "recruiter" | "engineer_referral" | "other";
+    email?: string;
+    email_confidence?: string;
+    profile_url?: string;
+    source?: string;
+  }>;
   description?: string;
   location?: string;
   remote_friendly?: boolean;
@@ -253,23 +264,50 @@ export async function ingestCompany(input: IngestCompanyInput) {
         score = COALESCE(EXCLUDED.score, companies.score)
     RETURNING *`;
 
-  const { rows } = await pool.query(sql, [
-    input.name,
-    normalized,
-    input.website ?? null,
-    domain,
-    input.description ?? null,
-    input.location ?? null,
-    input.remote_friendly ?? false,
-    input.team_size ?? null,
-    input.funding_round ?? null,
-    input.funding_amount ?? null,
-    fundingDate,
-    input.source_url ?? null,
-    input.score ?? null,
-  ]);
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const { rows } = await client.query(sql, [
+      input.name,
+      normalized,
+      input.website ?? null,
+      domain,
+      input.description ?? null,
+      input.location ?? null,
+      input.remote_friendly ?? false,
+      input.team_size ?? null,
+      input.funding_round ?? null,
+      input.funding_amount ?? null,
+      fundingDate,
+      input.source_url ?? null,
+      input.score ?? null,
+    ]);
 
-  return rows[0];
+    const savedContacts: ContactRecord[] = [];
+    if (input.emails?.length) {
+      savedContacts.push(...await addCompanyEmails(rows[0].id, input.emails, {
+        role: "Company Email",
+        contact_tier: "other",
+        profile_url: input.website ?? undefined,
+        source: "ingest_company",
+        email_confidence: "provided",
+      }, client));
+    }
+
+    if (input.contacts?.length) {
+      for (const contact of input.contacts) {
+        savedContacts.push(await addContact({ company_id: rows[0].id, ...contact }, client));
+      }
+    }
+
+    await client.query("COMMIT");
+    return { ...rows[0], contacts: savedContacts };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export async function updateCompanyProfile(
@@ -316,4 +354,15 @@ export async function getCompanyDetails(companyId: number) {
     contacts: contactsRes.rows,
     outreach_history: outreachRes.rows,
   };
+}
+
+export async function listCompaniesForEmailDiscovery(limit = 25, offset = 0) {
+  const { rows } = await pool.query(
+    `SELECT id, name, domain, website, team_size, status
+     FROM companies
+     ORDER BY funding_date DESC, id DESC
+     LIMIT $1 OFFSET $2`,
+    [limit, offset]
+  );
+  return rows;
 }

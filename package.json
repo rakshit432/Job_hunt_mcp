@@ -9,7 +9,7 @@
     "start": "node dist/http.js",
     "start:stdio": "node dist/index.js",
     "start:http": "tsx src/http.ts",
-    "test": "vitest run"
+    "test": "vitest run --exclude dist/**"
   },
   "keywords": [],
   "author": "",

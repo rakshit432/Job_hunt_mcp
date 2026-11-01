@@ -15,7 +15,7 @@ async function getSnovToken(): Promise<string | null> {
   if (cachedToken && Date.now() < cachedToken.expiresAt) return cachedToken.token;
 
   try {
-    const res = await fetch("https://api.snov.io/v1/oauth/access_token", {
+    const res = await fetchWithTimeout("https://api.snov.io/v1/oauth/access_token", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -51,7 +51,7 @@ export async function findEmailViaSnov(linkedinUrl: string): Promise<SnovResult 
 
   try {
     // ── Step 1: submit URL ──────────────────────────────────────────────────
-    const startRes = await fetch("https://api.snov.io/v2/li-profiles-by-urls/start", {
+    const startRes = await fetchWithTimeout("https://api.snov.io/v2/li-profiles-by-urls/start", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -61,7 +61,7 @@ export async function findEmailViaSnov(linkedinUrl: string): Promise<SnovResult 
     });
 
     if (!startRes.ok) {
-      console.warn(`Snov.io start returned ${startRes.status}: ${await startRes.text()}`);
+      console.warn(`Snov.io start returned status ${startRes.status}.`);
       return null;
     }
 
@@ -77,7 +77,7 @@ export async function findEmailViaSnov(linkedinUrl: string): Promise<SnovResult 
     for (let attempt = 0; attempt < 5; attempt++) {
       await new Promise((r) => setTimeout(r, 2000));
 
-      const resultRes = await fetch(
+      const resultRes = await fetchWithTimeout(
         `https://api.snov.io/v2/li-profiles-by-urls/result/${taskHash}`,
         { headers: { Authorization: `Bearer ${token}` } }
       );
@@ -98,7 +98,7 @@ export async function findEmailViaSnov(linkedinUrl: string): Promise<SnovResult 
       const profile = resultData.data[0];
       // Only return emails marked "valid" and of type "work"
       const workEmail = profile.emails?.find(
-        (e) => e.status === "valid" && e.email
+        (e) => e.status === "valid" && e.type === "work" && e.email
       );
 
       if (!workEmail?.email) continue;
@@ -117,3 +117,4 @@ export async function findEmailViaSnov(linkedinUrl: string): Promise<SnovResult 
     return null;
   }
 }
+import { fetchWithTimeout } from "./fetchWithTimeout.js";

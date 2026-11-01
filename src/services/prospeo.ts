@@ -15,7 +15,7 @@ export async function findEmailViaProspeo(linkedinUrl: string): Promise<ProspeoR
   if (!apiKey) return null;
 
   try {
-    const res = await fetch("https://api.prospeo.io/enrich-person", {
+    const res = await fetchWithTimeout("https://api.prospeo.io/enrich-person", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -29,7 +29,7 @@ export async function findEmailViaProspeo(linkedinUrl: string): Promise<ProspeoR
     });
 
     if (!res.ok) {
-      console.warn(`Prospeo /enrich-person returned ${res.status}: ${await res.text()}`);
+      console.warn(`Prospeo /enrich-person returned status ${res.status}.`);
       return null;
     }
 
@@ -58,3 +58,4 @@ export async function findEmailViaProspeo(linkedinUrl: string): Promise<ProspeoR
     return null;
   }
 }
+import { fetchWithTimeout } from "./fetchWithTimeout.js";

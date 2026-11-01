@@ -1,34 +1,48 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { runApolloWaterfall } from "../src/services/apolloWaterfall.js";
+import type { ApolloPerson } from "../src/services/apollo.js";
 
-describe("contact discovery rule logic", () => {
-  function getTierForCompanySize(teamSize: number): "founder" | "recruiter" {
-    return teamSize <= 50 ? "founder" : "recruiter";
-  }
-
-  function predictEmail(fullName: string, domain?: string) {
-    if (!domain) return null;
-    const clean = fullName.toLowerCase().replace(/[^a-z\s]/g, "").trim();
-    const parts = clean.split(/\s+/).filter(Boolean);
-    if (parts.length === 0) return null;
-    const first = parts[0];
-    const last = parts.length > 1 ? parts[parts.length - 1] : "";
-    return last ? `${first}.${last}@${domain}` : `${first}@${domain}`;
-  }
-
-  it("assigns founder tier for companies <= 50 employees", () => {
-    expect(getTierForCompanySize(10)).toBe("founder");
-    expect(getTierForCompanySize(50)).toBe("founder");
-  });
-
-  it("assigns recruiter tier for companies > 50 employees", () => {
-    expect(getTierForCompanySize(51)).toBe("recruiter");
-    expect(getTierForCompanySize(200)).toBe("recruiter");
-  });
-
-  it("predicts correct email formats", () => {
-    expect(predictEmail("Satya Nadella", "microsoft.com")).toBe("satya.nadella@microsoft.com");
-    expect(predictEmail("Cher", "example.com")).toBe("cher@example.com");
-    expect(predictEmail("John Doe", undefined)).toBeNull();
-  });
+const person = (email: string | null, email_status: string | null = "verified"): ApolloPerson => ({
+  name: "Taylor Example",
+  first_name: "Taylor",
+  last_name: "Example",
+  title: "Founder",
+  email,
+  email_status,
+  linkedin_url: null,
 });
 
+describe("Apollo contact discovery waterfall", () => {
+  it("returns verified founder contact and skips referral search", async () => {
+    const search = vi.fn(async () => [person("taylor@example.com")]);
+    const result = await runApolloWaterfall("example.com", 10, search);
+
+    expect(result.tier).toBe("founder");
+    expect(result.people.map((p) => p.email)).toEqual(["taylor@example.com"]);
+    expect(search).toHaveBeenCalledTimes(1);
+    expect(search.mock.calls[0][1]).toContain("Founder");
+  });
+
+  it("falls back to engineer referrals when primary results have no verified email", async () => {
+    const search = vi.fn()
+      .mockResolvedValueOnce([person("guess@example.com", "unverified")])
+      .mockResolvedValueOnce([person("engineer@example.com")]);
+    const result = await runApolloWaterfall("example.com", 100, search);
+
+    expect(result.tier).toBe("engineer_referral");
+    expect(result.people.map((p) => p.email)).toEqual(["engineer@example.com"]);
+    expect(search).toHaveBeenCalledTimes(2);
+    expect(search.mock.calls[0][1]).toContain("Technical Recruiter");
+    expect(search.mock.calls[1][1]).toContain("Senior Software Engineer");
+  });
+
+  it("continues with no contacts after both provider searches fail", async () => {
+    const search = vi.fn().mockRejectedValue(new Error("provider unavailable"));
+    const result = await runApolloWaterfall("example.com", 12, search);
+
+    expect(result.tier).toBe("engineer_referral");
+    expect(result.people).toEqual([]);
+    expect(result.diagnostics.apollo).toContain("provider unavailable");
+    expect(result.diagnostics.apollo_referral).toContain("provider unavailable");
+  });
+});

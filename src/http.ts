@@ -1,7 +1,10 @@
 import express from "express";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import type { ZodType } from "zod";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { createJobHuntServer } from "./index.js";
-import { initDb } from "./db/client.js";
+import { checkDbReady, initDb, pool } from "./db/client.js";
+import { UserFacingError } from "./errors.js";
 import {
   listChecklist,
   ingestCompany,
@@ -11,48 +14,117 @@ import {
   saveDraft,
   type ChecklistFilter,
 } from "./db/repositories/companies.js";
-import { discoverAndSaveContacts } from "./services/contactDiscovery.js";
+import { discoverAllCompanyEmails, discoverAndSaveContacts } from "./services/contactDiscovery.js";
 import { scrapeUrl } from "./services/firecrawl.js";
 import { buildEmail } from "./services/templating.js";
-import { isStatus } from "./services/statusMachine.js";
+import {
+  ChecklistFilterSchema,
+  BulkDiscoverySchema,
+  CompanyIdSchema,
+  DraftEmailSchema,
+  IngestCompanySchema,
+  ScrapeSchema,
+  UpdateProfileSchema,
+  UpdateStatusSchema,
+} from "./validation.js";
+
+function parseBody<T>(schema: ZodType<T>, body: unknown, res: express.Response): T | undefined {
+  const parsed = schema.safeParse(body);
+  if (!parsed.success) {
+    res.status(400).json({
+      error: "Invalid request body",
+      issues: parsed.error.issues.map((issue) => ({
+        path: issue.path.join("."),
+        message: issue.message,
+      })),
+    });
+    return undefined;
+  }
+  return parsed.data;
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+app.disable("x-powered-by");
 
 // Track active client SSE transports by sessionId
 const activeTransports = new Map<string, SSEServerTransport>();
 
-// Optional API key authorization (set AUTH_TOKEN in .env/environment to protect your server)
+// Bearer-token authorization for all stateful routes.
 const AUTH_TOKEN = process.env.AUTH_TOKEN;
+const CORS_ORIGINS = new Set((process.env.CORS_ORIGINS ?? "").split(",").map((origin) => origin.trim()).filter(Boolean));
+const requestBuckets = new Map<string, { start: number; count: number }>();
 
-// Enable JSON parser for REST API routes
-app.use(express.json());
+if (process.env.NODE_ENV === "production" && (!AUTH_TOKEN || AUTH_TOKEN.length < 32)) {
+  throw new Error("AUTH_TOKEN must contain at least 32 characters when NODE_ENV=production.");
+}
 
 app.use((req, res, next) => {
-  // CORS support for any web browser / web client
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Api-Key");
+  const requestId = randomUUID();
+  res.setHeader("X-Request-Id", requestId);
+  res.setHeader("Vary", "Origin");
+
+  const origin = req.headers.origin;
+  if (origin && CORS_ORIGINS.has(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  }
 
   if (req.method === "OPTIONS") {
-    res.sendStatus(200);
+    res.sendStatus(204);
     return;
   }
 
-  // If AUTH_TOKEN is configured, verify Bearer token or ?token= query param (skip for public docs / health)
-  if (AUTH_TOKEN && !["/", "/health", "/openapi.json"].includes(req.path)) {
+  if (AUTH_TOKEN && !["/", "/health", "/ready", "/openapi.json"].includes(req.path)) {
     const authHeader = req.headers.authorization;
-    const bearer = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
-    const queryToken = req.query.token as string | undefined;
-
-    if (bearer !== AUTH_TOKEN && queryToken !== AUTH_TOKEN) {
-      res.status(401).json({ error: "Unauthorized: Invalid or missing AUTH_TOKEN." });
+    const bearer = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : "";
+    const expected = Buffer.from(AUTH_TOKEN);
+    const received = Buffer.from(bearer);
+    if (received.length !== expected.length || !timingSafeEqual(received, expected)) {
+      res.status(401).json({ error: "Unauthorized" });
       return;
+    }
+  }
+
+  const expensiveRoute = ["/messages", "/api/discover-contacts", "/api/discover-all-contacts", "/api/scrape"].includes(req.path);
+  if (expensiveRoute) {
+    const now = Date.now();
+    const identity = req.headers.authorization || req.ip || "anonymous";
+    const key = createHash("sha256").update(identity).digest("hex");
+    const bucket = requestBuckets.get(key);
+    const windowMs = 60_000;
+    const limit = req.path === "/messages" ? 30 : req.path === "/api/discover-all-contacts" ? 2 : 6;
+    if (!bucket || now - bucket.start >= windowMs) {
+      requestBuckets.set(key, { start: now, count: 1 });
+    } else if (bucket.count >= limit) {
+      res.setHeader("Retry-After", String(Math.ceil((windowMs - (now - bucket.start)) / 1000)));
+      res.status(429).json({ error: "Rate limit exceeded", request_id: requestId });
+      return;
+    } else {
+      bucket.count += 1;
+    }
+    if (requestBuckets.size > 10_000) {
+      for (const [bucketKey, value] of requestBuckets) {
+        if (now - value.start >= windowMs) requestBuckets.delete(bucketKey);
+      }
     }
   }
 
   next();
 });
+
+app.use(express.json({ limit: "256kb" }));
+
+function sendRouteError(res: express.Response, error: unknown): void {
+  const requestId = String(res.getHeader("X-Request-Id") ?? "unknown");
+  if (error instanceof UserFacingError) {
+    res.status(400).json({ error: error.message, request_id: requestId });
+    return;
+  }
+  console.error(`[request ${requestId}]`, error);
+  res.status(500).json({ error: "Internal server error", request_id: requestId });
+}
 
 // ==========================================
 // 1. Web Home Dashboard (GET /)
@@ -102,7 +174,7 @@ app.get("/", (_req, res) => {
       <h3>📊 3. Health & Quick Links</h3>
       <ul>
         <li><a href="/health">/health</a> &mdash; Server status and active sessions</li>
-        <li><a href="/api/checklist">/api/checklist</a> &mdash; View current company pipeline</li>
+        <li>/api/checklist &mdash; View the pipeline (requires a bearer token)</li>
       </ul>
     </div>
   </div>
@@ -119,8 +191,16 @@ app.get("/health", (_req, res) => {
     status: "healthy",
     service: "job-hunt-mcp",
     version: "1.0.0",
-    activeSessions: activeTransports.size,
   });
+});
+
+app.get("/ready", async (_req, res) => {
+  try {
+    await checkDbReady();
+    res.json({ status: "ready" });
+  } catch {
+    res.status(503).json({ status: "not_ready" });
+  }
 });
 
 // ==========================================
@@ -179,10 +259,12 @@ app.get("/openapi.json", (_req, res) => {
     },
     servers: [
       {
-        url: "https://job-hunt-mcp.onrender.com",
-        description: "Live Production Server",
+        url: process.env.PUBLIC_BASE_URL || "https://job-hunt-mcp.onrender.com",
+        description: "Job-Hunt API",
       },
     ],
+    security: [{ bearerAuth: [] }],
+    components: { securitySchemes: { bearerAuth: { type: "http", scheme: "bearer" } } },
     paths: {
       "/api/checklist": {
         get: {
@@ -233,6 +315,19 @@ app.get("/openapi.json", (_req, res) => {
                     team_size: { type: "integer" },
                     funding_round: { type: "string" },
                     funding_amount: { type: "string" },
+                    emails: { type: "array", items: { type: "string", format: "email" } },
+                    contacts: {
+                      type: "array",
+                      items: {
+                        type: "object",
+                        properties: {
+                          name: { type: "string" }, role: { type: "string" },
+                          contact_tier: { type: "string", enum: ["founder", "recruiter", "engineer_referral", "other"] },
+                          email: { type: "string", format: "email" }, profile_url: { type: "string", format: "uri" },
+                          email_confidence: { type: "string" }, source: { type: "string" },
+                        },
+                      },
+                    },
                   },
                 },
               },
@@ -284,6 +379,27 @@ app.get("/openapi.json", (_req, res) => {
             },
           },
           responses: { "200": { description: "Contacts discovered and saved" } },
+        },
+      },
+      "/api/discover-all-contacts": {
+        post: {
+          operationId: "discoverContactsBatch",
+          summary: "Discover contacts for a bounded batch of companies",
+          requestBody: {
+            required: false,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    limit: { type: "integer", minimum: 1, maximum: 100, default: 25 },
+                    offset: { type: "integer", minimum: 0, default: 0 },
+                  },
+                },
+              },
+            },
+          },
+          responses: { "200": { description: "Batch results, failures, and next offset" } },
         },
       },
       "/api/draft-email": {
@@ -341,109 +457,164 @@ app.get("/openapi.json", (_req, res) => {
 // ==========================================
 app.get("/api/checklist", async (req, res) => {
   try {
-    const filter = (req.query.filter as ChecklistFilter) || "all";
+    const parsedFilter = ChecklistFilterSchema.safeParse(req.query.filter ?? "all");
+    if (!parsedFilter.success) {
+      res.status(400).json({ error: "Invalid filter", issues: parsedFilter.error.issues });
+      return;
+    }
+    const filter = parsedFilter.data as ChecklistFilter;
     const rows = await listChecklist(filter);
     res.json(rows);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+  } catch (err) {
+    sendRouteError(res, err);
   }
 });
 
 app.get("/api/company/:id", async (req, res) => {
   try {
     const companyId = parseInt(req.params.id, 10);
+    const parsed = CompanyIdSchema.safeParse({ company_id: companyId });
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid company id", issues: parsed.error.issues });
+      return;
+    }
     const details = await getCompanyDetails(companyId);
     res.json(details);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+  } catch (err) {
+    sendRouteError(res, err);
   }
 });
 
 app.post("/api/ingest", async (req, res) => {
   try {
-    const company = await ingestCompany(req.body);
+    const input = parseBody(IngestCompanySchema, req.body, res);
+    if (!input) return;
+    const company = await ingestCompany(input);
     res.json(company);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+  } catch (err) {
+    sendRouteError(res, err);
   }
 });
 
 app.post("/api/update-profile", async (req, res) => {
   try {
-    const { company_id, website, domain, team_size } = req.body;
+    const input = parseBody(UpdateProfileSchema, req.body, res);
+    if (!input) return;
+    const { company_id, website, domain, team_size } = input;
     const updated = await updateCompanyProfile(company_id, { website, domain, team_size });
     res.json(updated);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+  } catch (err) {
+    sendRouteError(res, err);
   }
 });
 
 app.post("/api/discover-contacts", async (req, res) => {
   try {
-    const companyId = parseInt(req.body.company_id, 10);
+    const input = parseBody(CompanyIdSchema, req.body, res);
+    if (!input) return;
+    const companyId = input.company_id;
     const result = await discoverAndSaveContacts(companyId);
     res.json(result);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+  } catch (err) {
+    sendRouteError(res, err);
+  }
+});
+
+app.post("/api/discover-all-contacts", async (req, res) => {
+  try {
+    const input = parseBody(BulkDiscoverySchema, req.body ?? {}, res);
+    if (!input) return;
+    const result = await discoverAllCompanyEmails(input.limit, input.offset);
+    res.json(result);
+  } catch (err) {
+    sendRouteError(res, err);
   }
 });
 
 app.post("/api/draft-email", async (req, res) => {
   try {
-    const { company_id, contact_id, focus, observation } = req.body;
+    const input = parseBody(DraftEmailSchema, req.body, res);
+    if (!input) return;
+    const { company_id, contact_id, focus, observation } = input;
     const draft = await saveDraft(company_id, contact_id, (company, contactName) =>
       buildEmail(company, contactName, focus, observation)
     );
     res.json(draft);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+  } catch (err) {
+    sendRouteError(res, err);
   }
 });
 
 app.post("/api/update-status", async (req, res) => {
   try {
-    const { company_id, status } = req.body;
-    if (!isStatus(status)) {
-      res.status(400).json({ error: `Invalid status '${status}'` });
-      return;
-    }
+    const input = parseBody(UpdateStatusSchema, req.body, res);
+    if (!input) return;
+    const { company_id, status } = input;
     const updated = await updateCompanyStatus(company_id, status);
     res.json(updated);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+  } catch (err) {
+    sendRouteError(res, err);
   }
 });
 
 app.post("/api/scrape", async (req, res) => {
   try {
-    const { url } = req.body;
+    const input = parseBody(ScrapeSchema, req.body, res);
+    if (!input) return;
+    const { url } = input;
     const page = await scrapeUrl(url);
     res.json(page);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+  } catch (err) {
+    sendRouteError(res, err);
   }
+});
+
+app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  const requestId = String(res.getHeader("X-Request-Id") ?? "unknown");
+  const parseError = error as { status?: number; type?: string };
+  if (parseError.status === 400 || parseError.type === "entity.parse.failed") {
+    res.status(400).json({ error: "Invalid JSON request body", request_id: requestId });
+    return;
+  }
+  if (parseError.status === 413 || parseError.type === "entity.too.large") {
+    res.status(413).json({ error: "Request body too large", request_id: requestId });
+    return;
+  }
+  sendRouteError(res, error);
 });
 
 // ==========================================
 // 6. Server Initialization
 // ==========================================
 async function start() {
-  try {
-    await initDb();
-    console.log("Database initialized successfully.");
-  } catch (err) {
-    console.error("Warning: Database initialization error:", err);
-  }
+  await initDb();
+  await checkDbReady();
+  console.log("Database initialized and ready.");
 
-  app.listen(PORT, () => {
+  const server = app.listen(PORT, () => {
     console.log(`\n==================================================`);
     console.log(`🚀 Job-Hunt MCP & REST Server running on port ${PORT}`);
     console.log(`Home:      http://localhost:${PORT}/`);
     console.log(`MCP SSE:   http://localhost:${PORT}/sse`);
     console.log(`OpenAPI:   http://localhost:${PORT}/openapi.json`);
     console.log(`Health:    http://localhost:${PORT}/health`);
+    console.log(`Readiness: http://localhost:${PORT}/ready`);
     console.log(`==================================================\n`);
   });
+
+  const shutdown = (signal: string) => {
+    console.log(`Received ${signal}; closing server.`);
+    server.close(() => {
+      void pool.end().finally(() => process.exit(0));
+    });
+    server.closeIdleConnections();
+    setTimeout(() => process.exit(1), 10_000).unref();
+  };
+  process.once("SIGTERM", () => shutdown("SIGTERM"));
+  process.once("SIGINT", () => shutdown("SIGINT"));
 }
 
-start();
+start().catch((error) => {
+  console.error("Server startup failed; refusing to accept traffic.", error);
+  process.exitCode = 1;
+});

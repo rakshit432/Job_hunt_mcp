@@ -1,4 +1,5 @@
 import { UserFacingError } from "../errors.js";
+import { fetchWithTimeout } from "./fetchWithTimeout.js";
 
 const FIRECRAWL_API_BASE = "https://api.firecrawl.dev/v1";
 
@@ -28,7 +29,7 @@ export interface SearchResultItem {
 export async function scrapeUrl(url: string): Promise<ScrapedPage> {
   const apiKey = getApiKey();
 
-  const response = await fetch(`${FIRECRAWL_API_BASE}/scrape`, {
+  const response = await fetchWithTimeout(`${FIRECRAWL_API_BASE}/scrape`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -41,8 +42,7 @@ export async function scrapeUrl(url: string): Promise<ScrapedPage> {
   });
 
   if (!response.ok) {
-    const errorText = await response.text();
-    throw new UserFacingError(`Firecrawl scrape failed (${response.status}): ${errorText}`);
+    throw new UserFacingError(`Firecrawl scrape failed (${response.status}).`);
   }
 
   const json = (await response.json()) as {
@@ -55,7 +55,7 @@ export async function scrapeUrl(url: string): Promise<ScrapedPage> {
   };
 
   if (!json.success || !json.data) {
-    throw new UserFacingError(json.error || "Failed to scrape URL via Firecrawl.");
+    throw new UserFacingError("Firecrawl could not scrape the requested URL.");
   }
 
   return {
@@ -69,7 +69,7 @@ export async function scrapeUrl(url: string): Promise<ScrapedPage> {
 export async function searchPeople(query: string, limit = 5): Promise<SearchResultItem[]> {
   const apiKey = getApiKey();
 
-  const response = await fetch(`${FIRECRAWL_API_BASE}/search`, {
+  const response = await fetchWithTimeout(`${FIRECRAWL_API_BASE}/search`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -82,8 +82,7 @@ export async function searchPeople(query: string, limit = 5): Promise<SearchResu
   });
 
   if (!response.ok) {
-    const errorText = await response.text();
-    throw new UserFacingError(`Firecrawl search failed (${response.status}): ${errorText}`);
+    throw new UserFacingError(`Firecrawl search failed (${response.status}).`);
   }
 
   const json = (await response.json()) as {
@@ -93,7 +92,7 @@ export async function searchPeople(query: string, limit = 5): Promise<SearchResu
   };
 
   if (!json.success || !json.data) {
-    throw new UserFacingError(json.error || "Failed to search people via Firecrawl.");
+    throw new UserFacingError("Firecrawl could not complete the requested search.");
   }
 
   return json.data.map((item) => ({
@@ -116,4 +115,29 @@ export async function fetchEmailsFromDomain(domain: string, limit = 5): Promise<
   const page = await scrapeUrl(url);
   const emails = extractEmailsFromText(page.markdown);
   return emails.slice(0, limit);
+}
+
+/** Scrape common company pages and return unique emails only. */
+export async function fetchEmailsFromCompanyWebsite(
+  domain: string,
+  limit = 10
+): Promise<string[]> {
+  const baseUrl = domain.startsWith("http") ? new URL(domain) : new URL(`https://${domain}`);
+  const pagePaths = ["", "/contact", "/contact-us", "/about", "/about-us", "/team", "/careers"];
+  const urls = pagePaths.map((pagePath) => new URL(pagePath, baseUrl).toString());
+
+  const results = await Promise.allSettled(urls.map((url) => scrapeUrl(url)));
+  const emails = new Set<string>();
+
+  for (const result of results) {
+    if (result.status !== "fulfilled") continue;
+    for (const email of extractEmailsFromText(result.value.markdown)) {
+      emails.add(email);
+      if (emails.size >= limit) {
+        return Array.from(emails);
+      }
+    }
+  }
+
+  return Array.from(emails);
 }
