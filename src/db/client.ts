@@ -11,9 +11,24 @@ if (!process.env.DATABASE_URL) {
   throw new Error("DATABASE_URL is not set");
 }
 
+function getDatabaseCa(): string | undefined {
+  const encoded = process.env.DATABASE_SSL_CA_BASE64?.trim();
+  if (!encoded) return undefined;
+
+  const ca = Buffer.from(encoded, "base64").toString("utf8").trim();
+  if (!ca.startsWith("-----BEGIN CERTIFICATE-----") || !ca.includes("-----END CERTIFICATE-----")) {
+    throw new Error("DATABASE_SSL_CA_BASE64 must contain a base64-encoded PEM certificate.");
+  }
+  return ca;
+}
+
+const databaseCa = getDatabaseCa();
+
 export const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: process.env.DATABASE_SSL_REJECT_UNAUTHORIZED !== "false" },
+  ssl: databaseCa
+    ? { ca: databaseCa, rejectUnauthorized: true }
+    : { rejectUnauthorized: process.env.DATABASE_SSL_REJECT_UNAUTHORIZED !== "false" },
   max: 5,
   connectionTimeoutMillis: 10_000,
   idleTimeoutMillis: 30_000,

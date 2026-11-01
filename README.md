@@ -115,6 +115,7 @@ The HTTP server is for hosted deployments. In production, set:
 NODE_ENV=production
 DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/DATABASE
 DATABASE_SSL_REJECT_UNAUTHORIZED=true
+DATABASE_SSL_CA_BASE64=base64-encoded-PEM-root-certificate
 AUTH_TOKEN=a-long-random-secret-at-least-32-characters
 FIRECRAWL_API_KEY=your-firecrawl-key
 APOLLO_API_KEY=your-apollo-key
@@ -124,6 +125,8 @@ PORT=3000
 ```
 
 `AUTH_TOKEN` is required in production. Send it as `Authorization: Bearer <token>`; query-string tokens are not accepted. `/health` is a public liveness endpoint, `/ready` checks database connectivity, and `/openapi.json` publishes the REST API description. Set `CORS_ORIGINS` to a comma-separated list of exact browser origins, or leave it empty if browser access is not needed.
+
+If Supabase reports `self-signed certificate in certificate chain`, download the database root certificate from Supabase **Database Settings → SSL Configuration**. Base64-encode the PEM file and set it as `DATABASE_SSL_CA_BASE64` in Render. The app then verifies the connection using that certificate. For a temporary trusted-endpoint workaround, setting `DATABASE_SSL_REJECT_UNAUTHORIZED=false` disables certificate verification; prefer the CA option for production.
 
 Run the compiled HTTP server with:
 
