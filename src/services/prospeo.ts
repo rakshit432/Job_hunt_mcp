@@ -6,62 +6,55 @@ export interface ProspeoResult {
 }
 
 /**
- * Calls Prospeo.io LinkedIn Email Finder API.
- * Free tier provides 75 free searches/month.
- * Endpoint: POST https://api.prospeo.io/linkedin-email-finder
+ * Calls Prospeo.io /enrich-person API (new endpoint as of 2024).
+ * Free tier: 75 credits/month. Credits only consumed when email is found.
+ * Docs: https://prospeo.io/api-docs
  */
 export async function findEmailViaProspeo(linkedinUrl: string): Promise<ProspeoResult | null> {
-  const apiKey = process.env.PROSPEO_API_KEY;
-  if (!apiKey) {
-    return null;
-  }
+  const apiKey = process.env.PROSPEO_API_KEY?.trim();
+  if (!apiKey) return null;
 
   try {
-    const res = await fetch("https://api.prospeo.io/linkedin-email-finder", {
+    const res = await fetch("https://api.prospeo.io/enrich-person", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "X-KEY": apiKey,
       },
       body: JSON.stringify({
-        url: linkedinUrl,
+        only_verified_email: true,
+        enrich_mobile: false,
+        data: { linkedin_url: linkedinUrl },
       }),
     });
 
     if (!res.ok) {
-      console.warn(`Prospeo API returned ${res.status}: ${await res.text()}`);
+      console.warn(`Prospeo /enrich-person returned ${res.status}: ${await res.text()}`);
       return null;
     }
 
     const json = (await res.json()) as {
-      error: boolean;
-      message?: string;
+      req_status?: boolean;
+      error_code?: string;
       response?: {
         email?: string;
         email_status?: "VERIFIED" | "UNVERIFIED";
         full_name?: string;
-        title?: string;
+        job_title?: string;
       };
     };
 
-    if (json.error || !json.response) {
-      return null;
-    }
+    if (!json.req_status || !json.response?.email) return null;
+    if (json.response.email_status !== "VERIFIED") return null;
 
-    // Only return strictly VERIFIED emails
-    if (json.response.email && json.response.email_status === "VERIFIED") {
-      return {
-        email: json.response.email,
-        email_status: "VERIFIED",
-        name: json.response.full_name,
-        title: json.response.title,
-      };
-    }
-
-    return null;
+    return {
+      email: json.response.email,
+      email_status: "VERIFIED",
+      name: json.response.full_name,
+      title: json.response.job_title,
+    };
   } catch (err) {
     console.warn("Prospeo lookup failed:", (err as Error).message);
     return null;
   }
 }
-

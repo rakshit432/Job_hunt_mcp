@@ -2,22 +2,17 @@ export interface SnovResult {
   email: string | null;
   email_status: "verified" | null;
   name?: string;
+  title?: string;
 }
 
-let cachedSnovToken: { token: string; expiresAt: number } | null = null;
+let cachedToken: { token: string; expiresAt: number } | null = null;
 
-async function getSnovAccessToken(): Promise<string | null> {
-  const clientId = process.env.SNOV_CLIENT_ID;
-  const clientSecret = process.env.SNOV_CLIENT_SECRET;
+async function getSnovToken(): Promise<string | null> {
+  const clientId = process.env.SNOV_CLIENT_ID?.trim();
+  const clientSecret = process.env.SNOV_CLIENT_SECRET?.trim();
+  if (!clientId || !clientSecret) return null;
 
-  if (!clientId || !clientSecret) {
-    return null;
-  }
-
-  // Use cached token if valid
-  if (cachedSnovToken && Date.now() < cachedSnovToken.expiresAt) {
-    return cachedSnovToken.token;
-  }
+  if (cachedToken && Date.now() < cachedToken.expiresAt) return cachedToken.token;
 
   try {
     const res = await fetch("https://api.snov.io/v1/oauth/access_token", {
@@ -29,86 +24,96 @@ async function getSnovAccessToken(): Promise<string | null> {
         client_secret: clientSecret,
       }),
     });
-
-    if (!res.ok) {
-      console.warn(`Snov.io auth failed (${res.status}): ${await res.text()}`);
-      return null;
-    }
-
+    if (!res.ok) return null;
     const data = (await res.json()) as { access_token?: string; expires_in?: number };
-    if (!data.access_token) {
-      return null;
-    }
-
-    cachedSnovToken = {
+    if (!data.access_token) return null;
+    cachedToken = {
       token: data.access_token,
-      expiresAt: Date.now() + (data.expires_in ? (data.expires_in - 60) * 1000 : 3600 * 1000),
+      expiresAt: Date.now() + ((data.expires_in ?? 3600) - 60) * 1000,
     };
-
-    return cachedSnovToken.token;
-  } catch (err) {
-    console.warn("Snov.io token request error:", (err as Error).message);
+    return cachedToken.token;
+  } catch {
     return null;
   }
 }
 
 /**
- * Calls Snov.io API to get emails from a LinkedIn profile URL.
- * Free tier provides 50 free credits/month.
+ * Calls Snov.io's 2-step async LinkedIn enrichment flow:
+ *   1. POST /v2/li-profiles-by-urls/start  → task_hash
+ *   2. GET  /v2/li-profiles-by-urls/result/{task_hash} (poll until ready, max 10 s)
+ *
+ * Free tier: 50 credits/month.
+ * Docs: https://snov.io/api
  */
 export async function findEmailViaSnov(linkedinUrl: string): Promise<SnovResult | null> {
-  const token = await getSnovAccessToken();
-  if (!token) {
-    return null;
-  }
+  const token = await getSnovToken();
+  if (!token) return null;
 
   try {
-    const res = await fetch("https://api.snov.io/v1/get-emails-from-url", {
+    // ── Step 1: submit URL ──────────────────────────────────────────────────
+    const startRes = await fetch("https://api.snov.io/v2/li-profiles-by-urls/start", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        url: linkedinUrl,
-        access_token: token,
-      }),
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${token}`,
+      },
+      body: JSON.stringify({ urls: [linkedinUrl] }),
     });
 
-    if (!res.ok) {
-      console.warn(`Snov.io lookup returned ${res.status}: ${await res.text()}`);
+    if (!startRes.ok) {
+      console.warn(`Snov.io start returned ${startRes.status}: ${await startRes.text()}`);
       return null;
     }
 
-    const json = (await res.json()) as {
-      success?: boolean;
-      data?: {
-        firstName?: string;
-        lastName?: string;
-        emails?: Array<{
-          email?: string;
-          status?: string; // "valid" | "catch_all" | "unknown"
+    const startData = (await startRes.json()) as { success?: boolean; task_hash?: string };
+    if (!startData.success || !startData.task_hash) {
+      console.warn("Snov.io start: no task_hash", startData);
+      return null;
+    }
+
+    const taskHash = startData.task_hash;
+
+    // ── Step 2: poll for result (max 5 attempts × 2 s = 10 s) ───────────────
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await new Promise((r) => setTimeout(r, 2000));
+
+      const resultRes = await fetch(
+        `https://api.snov.io/v2/li-profiles-by-urls/result/${taskHash}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+
+      if (!resultRes.ok) continue;
+
+      const resultData = (await resultRes.json()) as {
+        success?: boolean;
+        data?: Array<{
+          full_name?: string;
+          job_title?: string;
+          emails?: Array<{ email?: string; status?: string; type?: string }>;
         }>;
       };
-    };
 
-    if (!json.success || !json.data?.emails) {
-      return null;
+      if (!resultData.success || !resultData.data?.length) continue;
+
+      const profile = resultData.data[0];
+      // Only return emails marked "valid" and of type "work"
+      const workEmail = profile.emails?.find(
+        (e) => e.status === "valid" && e.email
+      );
+
+      if (!workEmail?.email) continue;
+
+      return {
+        email: workEmail.email,
+        email_status: "verified",
+        name: profile.full_name,
+        title: profile.job_title,
+      };
     }
 
-    // Only accept strictly "valid" emails (no catch-all or unverified guesses)
-    const validEmail = json.data.emails.find((e) => e.status === "valid" && e.email);
-    if (!validEmail || !validEmail.email) {
-      return null;
-    }
-
-    const fullName = [json.data.firstName, json.data.lastName].filter(Boolean).join(" ");
-
-    return {
-      email: validEmail.email,
-      email_status: "verified",
-      name: fullName || undefined,
-    };
+    return null; // timed out or no email found
   } catch (err) {
-    console.warn("Snov.io email lookup error:", (err as Error).message);
+    console.warn("Snov.io lookup failed:", (err as Error).message);
     return null;
   }
 }
-
