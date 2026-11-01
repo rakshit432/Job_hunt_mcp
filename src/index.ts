@@ -143,7 +143,7 @@ export function registerTools(server: McpServer) {
     "discover_contacts",
     {
       description:
-        "Finds verified hiring decision-makers and contacts exclusively via Apollo.io. Follows hiring strategy: (1) If company size <= 50, finds Founders/CTO. (2) If size > 50, finds Technical Recruiters / Talent Acquisition. (3) Fallback: finds Lead/Senior Software Engineers for referrals. Discovered contacts and verified work emails are automatically enriched and saved to the database.",
+        "Finds strictly verified hiring decision-makers and contacts using a multi-source waterfall (Apollo.io -> Prospeo & Snov.io LinkedIn Email Finder -> Company Homepage). Follows tier strategy: (1) If size <= 50, targets Founders/CTO. (2) If size > 50, targets Technical Recruiters/Talent Acquisition. (3) Referral: targets Lead/Senior Engineers. No emails are ever predicted or guessed. Contacts and verified emails are saved to the database.",
       inputSchema: {
         company_id: z.number().int().positive(),
       },
