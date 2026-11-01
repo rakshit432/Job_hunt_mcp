@@ -24,10 +24,7 @@ export interface SearchResultItem {
   url: string;
 }
 
-/**
- * Scrapes a single webpage (e.g. funding announcement, VC portfolio, tech news)
- * and returns clean markdown.
- */
+/** Scrapes a single webpage and returns markdown. */
 export async function scrapeUrl(url: string): Promise<ScrapedPage> {
   const apiKey = getApiKey();
 
@@ -68,10 +65,7 @@ export async function scrapeUrl(url: string): Promise<ScrapedPage> {
   };
 }
 
-/**
- * Searches the web via Firecrawl Search API to discover LinkedIn profiles,
- * team members, or specific roles.
- */
+/** Searches the web via Firecrawl Search API. */
 export async function searchPeople(query: string, limit = 5): Promise<SearchResultItem[]> {
   const apiKey = getApiKey();
 
@@ -109,3 +103,17 @@ export async function searchPeople(query: string, limit = 5): Promise<SearchResu
   }));
 }
 
+/** Extract email addresses from raw text. */
+export function extractEmailsFromText(text: string): string[] {
+  const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+  const matches = text.match(EMAIL_REGEX) ?? [];
+  return Array.from(new Set(matches.map((e) => e.toLowerCase())));
+}
+
+/** Scrape a domain homepage and return emails. */
+export async function fetchEmailsFromDomain(domain: string, limit = 5): Promise<string[]> {
+  const url = domain.startsWith("http") ? domain : `https://${domain}`;
+  const page = await scrapeUrl(url);
+  const emails = extractEmailsFromText(page.markdown);
+  return emails.slice(0, limit);
+}
