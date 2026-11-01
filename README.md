@@ -64,11 +64,9 @@ SNOV_CLIENT_ID=your-snov-client-id
 SNOV_CLIENT_SECRET=your-snov-client-secret
 FOLLOWUP_AFTER_DAYS=6
 
-# For a trusted local database endpoint using a self-signed certificate only:
-DATABASE_SSL_REJECT_UNAUTHORIZED=false
 ```
 
-Provider keys beyond `DATABASE_URL` are optional, but contact discovery will have fewer sources without them. The self-signed certificate setting disables certificate verification while retaining TLS encryption. Use it only for a database host you trust. For production, keep verification enabled and configure the provider’s CA if needed.
+Provider keys beyond `DATABASE_URL` are optional, but contact discovery will have fewer sources without them. PostgreSQL connections use TLS with certificate verification disabled to support database providers whose certificate chain is not trusted by Node.js.
 
 ### 2. Build the server
 
@@ -114,9 +112,8 @@ The HTTP server is for hosted deployments. In production, set:
 ```env
 NODE_ENV=production
 DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/DATABASE
-DATABASE_SSL_REJECT_UNAUTHORIZED=true
-DATABASE_SSL_CA_BASE64=base64-encoded-PEM-root-certificate
-AUTH_TOKEN=a-long-random-secret-at-least-32-characters
+# Optional. When set, protected HTTP routes require Authorization: Bearer <token>.
+# AUTH_TOKEN=
 FIRECRAWL_API_KEY=your-firecrawl-key
 APOLLO_API_KEY=your-apollo-key
 CORS_ORIGINS=https://your-approved-browser-origin.example
@@ -124,9 +121,7 @@ PUBLIC_BASE_URL=https://your-service.example
 PORT=3000
 ```
 
-`AUTH_TOKEN` is required in production. Send it as `Authorization: Bearer <token>`; query-string tokens are not accepted. `/health` is a public liveness endpoint, `/ready` checks database connectivity, and `/openapi.json` publishes the REST API description. Set `CORS_ORIGINS` to a comma-separated list of exact browser origins, or leave it empty if browser access is not needed.
-
-If Supabase reports `self-signed certificate in certificate chain`, download the database root certificate from Supabase **Database Settings → SSL Configuration**. Base64-encode the PEM file and set it as `DATABASE_SSL_CA_BASE64` in Render. The app then verifies the connection using that certificate. For a temporary trusted-endpoint workaround, setting `DATABASE_SSL_REJECT_UNAUTHORIZED=false` disables certificate verification; prefer the CA option for production.
+`AUTH_TOKEN` is optional. When it is unset, HTTP routes do not require a bearer token; when set, send it as `Authorization: Bearer <token>`. `/health` is a public liveness endpoint, `/ready` checks database connectivity, and `/openapi.json` publishes the REST API description. Set `CORS_ORIGINS` to a comma-separated list of exact browser origins, or leave it empty if browser access is not needed.
 
 Run the compiled HTTP server with:
 
@@ -135,7 +130,7 @@ npm run build
 npm start
 ```
 
-The Docker image uses Node 24, runs as a non-root user, and checks `/ready`. Hosted MCP clients must send the bearer token in their HTTP headers. Store secrets in the hosting provider’s secret manager, not in the repository.
+The Docker image uses Node 24, runs as a non-root user, and checks `/ready`. If `AUTH_TOKEN` is configured, hosted MCP clients must send it in their HTTP headers. Store secrets in the hosting provider’s secret manager, not in the repository.
 
 ## Status flow
 

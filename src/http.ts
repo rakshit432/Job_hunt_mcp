@@ -55,10 +55,6 @@ const AUTH_TOKEN = process.env.AUTH_TOKEN;
 const CORS_ORIGINS = new Set((process.env.CORS_ORIGINS ?? "").split(",").map((origin) => origin.trim()).filter(Boolean));
 const requestBuckets = new Map<string, { start: number; count: number }>();
 
-if (process.env.NODE_ENV === "production" && (!AUTH_TOKEN || AUTH_TOKEN.length < 32)) {
-  throw new Error("AUTH_TOKEN must contain at least 32 characters when NODE_ENV=production.");
-}
-
 app.use((req, res, next) => {
   const requestId = randomUUID();
   res.setHeader("X-Request-Id", requestId);
@@ -263,8 +259,6 @@ app.get("/openapi.json", (_req, res) => {
         description: "Job-Hunt API",
       },
     ],
-    security: [{ bearerAuth: [] }],
-    components: { securitySchemes: { bearerAuth: { type: "http", scheme: "bearer" } } },
     paths: {
       "/api/checklist": {
         get: {
